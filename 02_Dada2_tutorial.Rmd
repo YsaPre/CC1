@@ -1,0 +1,192 @@
+---
+title: "Dada2 tutorial"
+author: "Ysaline PRETTI" 
+output:  
+  github_document :
+    toc: true
+    toc_depth: 2
+---
+#Getting ready
+Nous avons installé le package Dada2 dans notre scripte 00_install afin de ne pas encombrer notre espace de travail. Maintenant nous devons charger la librairie, c'est-à-dire mettre Dada2 dans notre environnement afin de s'assurer de pouvoir avoir accès lors des run aux packages.
+```{r , results="hide"}
+library("dada2")
+```
+Dans notre script 01_data-import nous avons téléchargé les données sur lesquelles nous allons travailler. Ce sont des séquences d'ARN 16s Forwards et Reverse obtenue en Illumina à partir d'échantillons d'excréments de souris. Nous les avons directement unzipper dans un dossier nommé "MiSeq_SOP". Ici nous indiquons par cette ligne de code que nous nous plaçons dans ce dossier. Nous assignons le contenu de ce dossier à l'objet "path" pour simplifier le reste de nos commandes.
+Par "list.files(path)" nous demandons à voir la liste de ce qui est contenue dans le dossier MiSeq_SOP
+```{r}
+path <- "~/MiSeq_SOP" # CHANGE ME to the directory containing the fastq files after unzipping.
+list.files(path)
+```
+Une fois les données en visuel nous pouvons maintenant faire une sorte de tri dans les différents fichiers et les classer en fonction de ce qui nous intéresse dans des objets pour les futurs codes. Ici nous nommons fnFs tous les fichier contenant le motif _R1001.fastq dans son nom, on ne modifie pas le nom en le gardant entièrement avec "full.names=TRUE". Même commandes pour associer à fnRs avec le files contenant "_R2_001.fastq".
+Les commandes contenant "strs" font référence aux string chains de caractères.
+Avec "sapply" ont simplifie le noms du fichier contenue dans fnFs en demandant de couper après le premier "_", ils sont maintenant associé à l'objet "sample.names"
+```{r}
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+#Inspect read quality profiles
+La on va tracer en graphique les scores de qualité dans les fnFs du 1 AU 4, pour savoir ou couper après au moment du trime
+Par la commande plot nous traçons un graphique de scores de qualité des séquences, ici nous observons les séquences de fnRS de la 1ère à la 4ème. Cette observons va nous servir à savoir à quel nucléotide nous voulons faire le trim afin d'obtenir des séquences le plus net possible.
+```{r}
+plotQualityProfile(fnRs[1:4])
+```
+Ici sur le même principe que vu ci-dessus nous observons les fichier 1 ET 4 des fnFs par l'ajout dans la commande "[c(x,x)]".
+```{r}
+plotQualityProfile(fnFs[c(1,4)])
+```
+#Filter and Trim
+Ici nous créons les fichiers dans lesquels nous allons ranger nos données une fois filtrées (opération suivante). Ils seront contenus dans la sous-classe "filtered". Nous utiliserons les noms simplifier créés auparavant. Les noms de ces fichiers sont filtFs et flitRS.
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+Nous utilisons grâce au packages Dada2 la fonction "filterAndTrim". Parmis nos fichier fnFs, filtFs, fnRs et filtRs, nous décidons de tronquer respectivement (c(x,x)) par truncLen au niveau des pb 240 pour les fnFs et 160 pour les fnRs ( les Forwards étant de meilleurs qualité que les Reverses par la technique Illumina). La ligne de code composé des différents "max" sont des paramètres standards de la fonction filterAndTrim.
+Avec la commande "head(out)", c'est pour nous éviter de faire un print et d'avoir beaucoup trop de données, on demande à voir seulement les premiers fichiers de la liste. La colonne "reads.in" nous donne par séquence, le nombre de pb rentré et "reads.out" nous donne le nombre de pb sortie avec le trim. 
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+head(out)
+```
+# Learn the Error Rates
+LA fonction "learnErros" appartient au packages Dada2.
+Cela nous permet de calculer un modèles d'erreurs à partir des données de nos séquences, et donc de savoir s'il y a eu erreurs dans la lecture des bases en lisant par exemple un T à la place d'un A. On applique cette fonction sur nos reads forwards et nos reverses. 
+Le "multithread" nous permets de préciser que cela se fait de façons "multifonction" et donc on précise que le code peut faire plusieurs choses à la fois.
+On applique les résultats de cette fonction à l'objets "errF" pour forward et "errR" pour reverse.
+On applique cette méthode sur les reads forward puis les reverses, multithread=multitask
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+```
+```{r}
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+Nous voulons maintenant visualiser les taux d'erreurs estimés.
+les titres de chaque tableaux A2A par exemple se lis "A to A" donc "un A en A".
+La ligne noir nous montre les taux d'erreurs estimés par la fonction, et la ligne rouge les taux d'erreurs estimés selon le score de Qualité.
+Nous voyons bien que les erreurs (point noir) correspondants à la ligne noire "estimé". Donc pas de différences trop importantes pour devoir revenir sur nos séquences. De plus, plus le scores de Qualité et haut, plus le taux d'erreurs diminue.
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+#Sample Inference
+On applique la fonction de dada qui est un algorithme d'interférence aux données que nous avons filtré et trim, ainsi qu'à celles ayant eu l'algorithme d'erreurs.
+Cela nous permet d'enlever les bruits de fond.
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+```
+```{r}
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+```{r}
+dadaRs[[3]]
+```
+#Merged paired reads
+Maintenant par la fonction "mergePairs", nous fusionnons les reads Forwards et Reverses, afin de former des contigs. Pour cela nous prenons les données que nous avons filtré et trim précédemments ainsi que les données "denoised" par dada.Nous nommons l'objet contenant les objets "mergers"
+Ici ce que nous devons lire:
+A la fin nous avons trouvé 6551 paires de reads, dans celles-ci, en tout nous avons 106 séquences différentes, provenant d'une entré de 6907 paires de reads contenant 199 séquences différentes.
+Ou autrement dit, parmi 6907 séquences entrées dans la fonction, nous avons pu en merge 6551.
+NB: unique pairings=contigs
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+```
+Maintenant avec nous demandons à voir le début du tableau des données du premier échantillon
+```{r}
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+#Construct sequence table
+Nous allons maintenant pouvoir faire une table de séquences à partir des merges obtenues, qui sont dans notre objet "mergers". Nous pouvons faire ça avec une fonction "makeSequenceTabl" faisant partie du package dada2.
+Ce que nous lisons en sortie: Dans 0 échantillons, on a un total de 293 séquences unique
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+Ici nous voulons savoir la taille de nos 293 séquences, 
+Pour lire la commande: On prend les séquences contenues dans "getSequence" que l'on trouvera dans la table "seqtab", et par la commande "nchar", on demande à savoir la taille de chacune.
+La ligne supérieure de la table nous indique la taille des séquences et la ligne inférieur le nombre de séquences de cette taille.
+```{r}
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+#Removes chimeras
+Les chimères nous faussent les lectures, elles apparaissant lorsqu'il y a chevauchement entre séquences des deux espèces différentes par exemple. Nous voulons les supprimer
+Pour lire la commande:
+Par la fonction "removeBimerasDenovo", nous enlevons les nouvelles séquences (non comparables avec ce que l'on connait déjà) étant des bimères, nous appliquons cette fonction à nos séquences de l'objet "seqtab" (contenant nos merges). C'est assigner à l'objet seqtab.nochim. La commande dim nous donne la dimension de la table
+Nous lisons que la fonction a identifié 61 chimères dans nos 293 et donc une fois enlevé nous avons un total de 232 séquences sur 20 échantillons.
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+Maintenant nous voulons lire en pourcentage le taux de chimères pour nous faire une meilleure idée. Nous divisons la totalité de nos séquences sans chimères par nos séquences avec chimères. Le pourcentage obtenues nous donne le taux de séquences non chimériques. Si nous le 1- devant la formule, nous obtenue l'inverse et donc le taux de séquences chimériques.
+Il y a 96,5% de non chimériques dans notre jeu de données, avec le 1- nous avons 3,5% de chimérique
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+#Track reads through the pipeline
+Nous regardons l'évolution des séquences par échantillons au fur et à mesure de nos différentes interventions, filtrage, fusions etc. 
+
+Dans ce code nous définissons la fonctions getUnique qui nous permettras d'extraire des séquences uniques des jeux de données voulus. Cette fonction est e à getN. Ce dernier sera appliqué à nos différentes données contenues dans nos dadaFs et Rs, nos merges et nos nochim. On définit bien avec "out" que nous voulons que les sorties de ces jeux de données.
+Puis nous définitssons tout simplement les noms des colonnes par "colnames" en fonctions de ce que nous ressortirons de track. De même pour les ranger avec "rownames".
+On finit avec un print pour voir notre beau tableau de trackage/suivi de données.
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+print(track)
+```
+
+
+#Assigne Taxonomy
+Par le bash "wget" nous allons extraire du lien, sur le site de silva, les données d'attribution de taxonomie afin de savoir à quelles espèces appartiennent nos séquences une fois "purifier" à notre volonté.
+```{bash , results="hide"}
+wget https://zenodo.org/record/3986799/files/silva_nr99_v138_train_set.fa.gz
+```
+Par la fonction de Dada2 "assignTaxonomy" compare notre seq.tabnochim et les données préalablement téléchargées qui se situent dans Home~ du nom de silva_nr99_v138_train_set.fa.gz . 
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "~/silva_nr99_v138_train_set.fa.gz", multithread=TRUE)
+```
+Sur le même principe on retourne sur silva chercher de nouvelles données d'assignements
+```{bash , results="hide"}
+wget https://zenodo.org/record/3986799/files/silva_species_assignment_v138.fa.gz
+```
+Avec ces nouvelles données on ajoute à la taxonomie l'assignement des espèces, c'est donc plus précis.
+```{r}
+taxa<- addSpecies(taxa, "~/silva_species_assignment_v138.fa.gz")
+```
+Toutes ces téléchargements ont été associé à l'objet "taxa" que l'on renomme "taxa.print" tout en précisant par la suite de ne pas montrer le nom des rangers, et on fait un aperçu du début du tableau avec "head".
+```{r}
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+# Evaluate accuracy
+Mock est une communauté créer par nous-mêmes, elle contient 20 souches connues déjà séquencées.
+Cette étape nous permet de vérifier l'exactitude des étapes appliqué par Dada2 sur nos échantillons pour déterminer s'il existe un taux d'erreurs.
+On vérifie donc si Dada2 peut retrouver le nombre de souches contenue dans la communauté mock. Ici c'est exact. Puis on recompare aux données que Dada2 était supposé trouver en allant les récupérer dans le fichier HMP_MOCK.v35.fasta. Encore une fois c'était exacte.
+```{r}
+unqs.mock <- seqtab.nochim["Mock",]
+unqs.mock <- sort(unqs.mock[unqs.mock>0], decreasing=TRUE) # Drop ASVs absent in the Mock
+cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock community.\n")
+```
+```{r}
+mock.ref <- getSequences(file.path(path, "HMP_MOCK.v35.fasta"))
+match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
+cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+```
+Maintenant nous chargeons notre library phyloseq pour des analyses plus précises sur nos communautés de d'excréments de souris.
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+```
+
+```{r}
+save.image(file="02_data-analysis-with-DADA2_FinalEnv")
+```
+
